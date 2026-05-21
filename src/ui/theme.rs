@@ -2,6 +2,7 @@ use eframe::egui::{Color32, Context, Stroke, Visuals};
 
 use crate::config::Theme;
 
+#[allow(dead_code)]
 pub struct Palette {
     pub paper: Color32,
     pub ink: Color32,
