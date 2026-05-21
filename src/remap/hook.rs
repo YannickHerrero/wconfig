@@ -43,37 +43,48 @@ struct HookState {
 static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
 static HOOK_HANDLE: OnceLock<Mutex<Option<HookSlot>>> = OnceLock::new();
 
-pub fn install(initial_cfg: CapsLockRemap, tap_timeout_ms: u64) -> Result<()> {
-    STATE
-        .set(Mutex::new(HookState {
+fn ensure_state(cfg: CapsLockRemap, tap_timeout_ms: u64) -> &'static Mutex<HookState> {
+    STATE.get_or_init(|| {
+        Mutex::new(HookState {
             machine: Machine::new(),
-            cfg: initial_cfg,
+            cfg,
             tap_timeout_ms,
             timer: None,
-        }))
-        .map_err(|_| anyhow::anyhow!("hook state already initialised"))?;
+        })
+    })
+}
 
+/// Install (idempotent) the WH_KEYBOARD_LL hook. Subsequent calls update the
+/// active CapsLockRemap and tap_timeout without re-registering the OS hook.
+pub fn install(cfg: CapsLockRemap, tap_timeout_ms: u64) -> Result<()> {
+    ensure_state(cfg.clone(), tap_timeout_ms);
+    reconfigure(cfg, tap_timeout_ms);
+
+    let slot = HOOK_HANDLE.get_or_init(|| Mutex::new(None));
+    let mut slot = slot.lock().unwrap();
+    if slot.is_some() {
+        return Ok(());
+    }
     let hh = unsafe {
         SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_proc), Some(HINSTANCE::default()), 0)
             .context("SetWindowsHookExW(WH_KEYBOARD_LL)")?
     };
-    HOOK_HANDLE
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .replace(HookSlot(hh));
+    *slot = Some(HookSlot(hh));
     tracing::info!("keyboard hook installed");
     Ok(())
 }
 
+/// Uninstall the OS hook if installed. Safe to call when no hook is active.
 pub fn uninstall() -> Result<()> {
-    if let Some(slot) = HOOK_HANDLE.get() {
-        if let Some(HookSlot(hh)) = slot.lock().unwrap().take() {
-            unsafe {
-                UnhookWindowsHookEx(hh).context("UnhookWindowsHookEx")?;
-            }
-            tracing::info!("keyboard hook uninstalled");
+    let Some(slot) = HOOK_HANDLE.get() else {
+        return Ok(());
+    };
+    let mut slot = slot.lock().unwrap();
+    if let Some(HookSlot(hh)) = slot.take() {
+        unsafe {
+            UnhookWindowsHookEx(hh).context("UnhookWindowsHookEx")?;
         }
+        tracing::info!("keyboard hook uninstalled");
     }
     Ok(())
 }
