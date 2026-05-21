@@ -8,6 +8,7 @@ mod hotkey;
 mod ipc;
 mod remap;
 mod single_instance;
+mod tray;
 mod ui;
 
 use eframe::egui;
