@@ -8,7 +8,7 @@ endif
 DEST_DIR := /mnt/c/Users/$(WIN_USER)/Documents/apps
 DEST := $(DEST_DIR)/$(BIN)
 
-.PHONY: default build install kill clean
+.PHONY: default build install kill clean deploy
 default: install
 
 build:
@@ -27,3 +27,6 @@ install: build kill
 
 clean:
 	cargo clean
+
+deploy:
+	@./scripts/deploy.sh $(BUMP)
