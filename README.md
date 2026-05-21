@@ -4,6 +4,8 @@ A small Windows configuration utility, written in Rust. Acts as a **hotkey
 daemon** — global key combinations like `Alt+Enter` or `Alt+B` can launch
 apps, open URLs, run scripts, or focus a running window.
 
+![wconfig settings GUI showing the Hotkey Bindings page](assets/wconfig-demo.png)
+
 State lives in a single hand-editable TOML file. A tray icon hosts a small
 egui-based settings GUI for editing it. Changes to the file from any external
 editor are picked up within ~250ms.
