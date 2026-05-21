@@ -3,7 +3,13 @@ use std::sync::mpsc::{Receiver, channel};
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use notify::RecommendedWatcher;
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tray_icon::menu::MenuEvent;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOW, SetForegroundWindow, SetWindowLongPtrW,
+    ShowWindow, WS_EX_TOOLWINDOW,
+};
 
 use crate::action;
 use crate::autostart;
@@ -41,6 +47,14 @@ pub struct App {
     dirty: bool,
     last_status: Option<String>,
     quitting: bool,
+    /// HWND of the eframe root window. Cached on the first frame so we can
+    /// call Win32 ShowWindow directly instead of relying on egui-winit's
+    /// `ViewportCommand::Visible`, which empirically doesn't stick on this
+    /// user's system.
+    hwnd_raw: Option<isize>,
+    /// On the first frame we re-hide the window if the user wanted to start
+    /// minimised, to defeat winit's brief flash before commands are applied.
+    first_frame_done: bool,
 }
 
 impl App {
@@ -71,7 +85,6 @@ impl App {
         let binding_errors = hotkey.set_bindings(&cfg.bindings);
 
         let initial_visible = !cfg.daemon.start_minimized;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(initial_visible));
 
         Self {
             cfg,
@@ -89,17 +102,47 @@ impl App {
             dirty: false,
             last_status: None,
             quitting: false,
+            hwnd_raw: None,
+            first_frame_done: false,
         }
     }
 
-    fn show_window(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    fn cache_hwnd(&mut self, frame: &mut eframe::Frame) {
+        if self.hwnd_raw.is_some() {
+            return;
+        }
+        match frame.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(w)) => {
+                self.hwnd_raw = Some(w.hwnd.get());
+                tracing::info!("cached HWND={:#x}", w.hwnd.get());
+            }
+            Ok(other) => tracing::warn!("unexpected window handle variant: {other:?}"),
+            Err(e) => tracing::warn!("no window handle yet: {e}"),
+        }
+    }
+
+    fn hwnd(&self) -> Option<HWND> {
+        self.hwnd_raw.map(|h| HWND(h as *mut _))
+    }
+
+    fn show_window(&mut self, _ctx: &egui::Context) {
+        if let Some(h) = self.hwnd() {
+            unsafe {
+                let _ = ShowWindow(h, SW_SHOW);
+                let _ = SetForegroundWindow(h);
+            }
+            tracing::info!("show_window: ShowWindow(SW_SHOW)");
+        }
         self.visible = true;
     }
 
-    fn hide_window(&mut self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    fn hide_window(&mut self, _ctx: &egui::Context) {
+        if let Some(h) = self.hwnd() {
+            unsafe {
+                let _ = ShowWindow(h, SW_HIDE);
+            }
+            tracing::info!("hide_window: ShowWindow(SW_HIDE)");
+        }
         self.visible = false;
     }
 
@@ -197,8 +240,34 @@ impl eframe::App for App {
             .to_normalized_gamma_f32()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.cache_hwnd(frame);
+
+        // On the very first frame, apply WS_EX_TOOLWINDOW so tiling window
+        // managers (glazewm, komorebi, etc.) skip wconfig's window — without
+        // this, the WM keeps the window in its tile layout and fights every
+        // hide we send. Also force-hide if start_minimized: winit's initial
+        // `with_visible(false)` can leak a brief flash on Windows.
+        if !self.first_frame_done {
+            self.first_frame_done = true;
+            if let Some(h) = self.hwnd() {
+                unsafe {
+                    let current = GetWindowLongPtrW(h, GWL_EXSTYLE);
+                    SetWindowLongPtrW(h, GWL_EXSTYLE, current | (WS_EX_TOOLWINDOW.0 as isize));
+                }
+                tracing::info!("applied WS_EX_TOOLWINDOW to root viewport");
+            }
+            if !self.visible {
+                if let Some(h) = self.hwnd() {
+                    unsafe {
+                        let _ = ShowWindow(h, SW_HIDE);
+                    }
+                    tracing::info!("first-frame force-hide");
+                }
+            }
+        }
+
         if !self.theme_applied {
             theme::apply(&ctx, self.cfg.theme);
             self.theme_applied = true;
@@ -218,6 +287,13 @@ impl eframe::App for App {
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_window(&ctx);
+            return;
+        }
+
+        // Skip rendering panels when the window is hidden — drawing them
+        // can interact with winit/egui's visibility tracking and lead to
+        // a brief re-show on the next paint cycle.
+        if !self.visible {
             return;
         }
 
