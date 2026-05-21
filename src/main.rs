@@ -7,7 +7,6 @@ mod config;
 mod hotkey;
 mod ipc;
 mod logging;
-mod remap;
 mod single_instance;
 mod tray;
 mod ui;
