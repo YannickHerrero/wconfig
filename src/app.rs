@@ -92,10 +92,6 @@ impl App {
         }
     }
 
-    pub fn mark_dirty(&mut self) {
-        self.dirty = true;
-    }
-
     fn show_window(&mut self, ctx: &egui::Context) {
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
