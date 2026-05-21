@@ -40,6 +40,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             "Start minimized to tray",
         );
     });
+
+    ui.add_space(12.0);
+
+    section(ui, "About", |ui| {
+        ui.label(
+            egui::RichText::new(format!("wconfig v{}", env!("CARGO_PKG_VERSION")))
+                .small()
+                .weak(),
+        );
+    });
 }
 
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
