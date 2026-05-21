@@ -49,7 +49,6 @@ impl App {
         cfg: Config,
         mut hotkey: HotkeyMgr,
         tray: Tray,
-        watcher: RecommendedWatcher,
         ctx: &egui::Context,
         show_rx: Receiver<ShowGui>,
     ) -> Self {
@@ -68,10 +67,7 @@ impl App {
         }));
 
         let (cfg_tx, cfg_rx) = channel();
-        // Re-spawn the watcher: the caller passed us a watcher initialised
-        // against a throwaway sender just to keep it alive; we need to bind
-        // it to our cfg_rx. Easiest: ignore the passed one, build our own.
-        let watcher = config_watcher::spawn(cfg_tx).expect("rebuild config watcher");
+        let watcher = config_watcher::spawn(cfg_tx).expect("spawn config watcher");
 
         let binding_errors = hotkey.set_bindings(&cfg.bindings);
 

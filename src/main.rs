@@ -64,17 +64,6 @@ fn main() -> eframe::Result<()> {
         eprintln!("wconfig: start show-gui listener: {e}");
     }
 
-    // The App constructor will spawn its own watcher; this throwaway exists
-    // only to satisfy the constructor signature without races at startup.
-    let (dummy_tx, _dummy_rx) = channel();
-    let watcher = match config::watcher::spawn(dummy_tx) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("wconfig: start config watcher: {e}");
-            return Ok(());
-        }
-    };
-
     let viewport = egui::ViewportBuilder::default()
         .with_title("wconfig")
         .with_inner_size([app::WINDOW_W, app::WINDOW_H])
@@ -94,7 +83,6 @@ fn main() -> eframe::Result<()> {
                 cfg,
                 hotkey,
                 tray,
-                watcher,
                 &cc.egui_ctx,
                 show_rx,
             )) as Box<dyn eframe::App>)
