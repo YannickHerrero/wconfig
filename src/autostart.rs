@@ -6,19 +6,6 @@ const KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const VALUE_NAME: &str = "wconfig";
 
 #[cfg(windows)]
-pub fn is_enabled() -> Result<bool> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let Ok(key) = hkcu.open_subkey(KEY_PATH) else {
-        return Ok(false);
-    };
-    let value: std::io::Result<String> = key.get_value(VALUE_NAME);
-    Ok(value.is_ok())
-}
-
-#[cfg(windows)]
 pub fn enable() -> Result<()> {
     use winreg::RegKey;
     use winreg::enums::HKEY_CURRENT_USER;
@@ -53,11 +40,6 @@ pub fn sync(desired: bool) -> Result<()> {
     } else {
         disable()
     }
-}
-
-#[cfg(not(windows))]
-pub fn is_enabled() -> Result<bool> {
-    Ok(false)
 }
 
 #[cfg(not(windows))]
