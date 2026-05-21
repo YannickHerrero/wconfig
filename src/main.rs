@@ -2,6 +2,7 @@
 
 mod app;
 mod config;
+mod hotkey;
 mod ui;
 
 use eframe::egui;
