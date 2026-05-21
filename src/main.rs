@@ -5,7 +5,9 @@ mod app;
 mod autostart;
 mod config;
 mod hotkey;
+mod ipc;
 mod remap;
+mod single_instance;
 mod ui;
 
 use eframe::egui;
