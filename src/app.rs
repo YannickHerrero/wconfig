@@ -13,7 +13,7 @@ use crate::hotkey::{BindingError, Manager as HotkeyMgr};
 use crate::ipc::ShowGui;
 use crate::remap;
 use crate::tray::Tray;
-use crate::ui::{bindings, general, remap as remap_page, theme};
+use crate::ui::{bindings, general, theme};
 
 pub const WINDOW_W: f32 = 760.0;
 pub const WINDOW_H: f32 = 560.0;
@@ -21,7 +21,6 @@ pub const WINDOW_H: f32 = 560.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     General,
-    Remap,
     Bindings,
 }
 
@@ -268,7 +267,6 @@ impl eframe::App for App {
                 ui.heading("wconfig");
                 ui.add_space(16.0);
                 nav_button(ui, &mut self.page, Page::General, "General");
-                nav_button(ui, &mut self.page, Page::Remap, "Key Remap");
                 nav_button(ui, &mut self.page, Page::Bindings, "Hotkey Bindings");
             });
 
@@ -294,7 +292,6 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show_inside(ui, |ui| match self.page {
             Page::General => general::show(self, ui),
-            Page::Remap => remap_page::show(self, ui),
             Page::Bindings => bindings::show(self, ui),
         });
 
