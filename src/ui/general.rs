@@ -40,24 +40,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             "Start minimized to tray",
         );
     });
-
-    ui.add_space(12.0);
-
-    section(ui, "Key remap timing", |ui| {
-        ui.horizontal(|ui| {
-            ui.label("Tap-vs-hold threshold");
-            ui.add(
-                egui::Slider::new(&mut app.cfg.daemon.tap_timeout_ms, 50..=500).suffix(" ms"),
-            );
-        });
-        ui.label(
-            egui::RichText::new(
-                "Press shorter than this counts as a tap; longer counts as a hold.",
-            )
-            .small()
-            .weak(),
-        );
-    });
 }
 
 fn section(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
