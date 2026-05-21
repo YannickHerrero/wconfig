@@ -1,4 +1,5 @@
 pub mod schema;
+pub mod watcher;
 
 pub use schema::*;
 
