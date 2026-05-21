@@ -226,9 +226,9 @@ impl eframe::App for App {
 
         let prev_cfg_hash = config_signature(&self.cfg);
 
-        egui::SidePanel::left("nav")
+        egui::Panel::left("nav")
             .resizable(false)
-            .default_width(180.0)
+            .default_size(180.0)
             .show_inside(ui, |ui| {
                 ui.add_space(12.0);
                 ui.heading("wconfig");
@@ -238,7 +238,7 @@ impl eframe::App for App {
                 nav_button(ui, &mut self.page, Page::Bindings, "Hotkey Bindings");
             });
 
-        egui::TopBottomPanel::bottom("status").show_inside(ui, |ui| {
+        egui::Panel::bottom("status").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Save").clicked() {
                     self.save_and_apply(&ctx);
