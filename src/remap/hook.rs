@@ -1,211 +1,161 @@
 //! Low-level keyboard hook (WH_KEYBOARD_LL) that drives the tap-vs-hold FSM.
 //!
-//! The hook is installed on a dedicated thread whose only job is to pump
-//! Win32 messages. This matters: Windows enforces a per-callback timeout
-//! (LowLevelHooksTimeout, default 300ms) and if exceeded the OS silently
-//! breaks the hook chain for that event, which can drop other apps' LL
-//! hooks (e.g. glazewm's Alt+1/2/3 workspace switching). Running on the
-//! eframe UI thread risks that timeout whenever the GUI is doing real
-//! work; a dedicated thread sidesteps the problem entirely. This is the
-//! same approach kanata's `--win-llhook` backend and PowerToys use.
+//! The hook is installed on the thread that calls `install()` — the caller
+//! must already be a message-pumping thread (i.e. eframe's main thread).
+//! Worker threads created via std::thread::spawn don't reliably receive
+//! WH_KEYBOARD_LL callbacks on Windows: empirically, the OS-side dispatch
+//! often no-ops if the installing thread has no window context.
+//!
+//! Because the callback runs on the GUI thread, every cycle must stay well
+//! under Windows' `LowLevelHooksTimeout` (default 300ms) — if exceeded the
+//! OS silently drops this event from the chain, which can break other apps'
+//! LL hooks (e.g. glazewm). To keep the hot path microsecond-fast we read
+//! the active config via `ArcSwap` (lock-free) and the FSM state via an
+//! atomic, only acquiring the `Mutex<Machine>` when we actually need to
+//! mutate FSM state — i.e. on caps events.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
+use std::sync::Arc;
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, SendInput,
     VIRTUAL_KEY, VK_CAPITAL,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    PostThreadMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    CallNextHookEx, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, SetWindowsHookExW,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use windows::core::PCWSTR;
 
-use super::state::{Effect, HookEvent, Machine};
+use super::state::{Effect, HookEvent, Machine, StateKind};
 use super::timer::TimerHandle;
-use crate::config::CapsLockRemap;
+use crate::config::{CapsLockRemap, RemapMode};
 
 /// Marker stored in `KBDLLHOOKSTRUCT.dwExtraInfo` (and SendInput's dwExtraInfo)
 /// so the hook recognises and skips its own synthetic events. "WCNF" = 0x57434E46.
 pub const WCONFIG_MARKER: usize = 0x57434E46;
 
+// FSM state kept here as an atomic so the hook callback can read it without
+// locking. Mutations go through the Mutex<Machine> below.
+const STATE_IDLE: u8 = 0;
+const STATE_PENDING: u8 = 1;
+const STATE_HOLD: u8 = 2;
+static STATE_TAG: AtomicU8 = AtomicU8::new(STATE_IDLE);
+
+struct HookSlot(HHOOK);
+unsafe impl Send for HookSlot {}
+unsafe impl Sync for HookSlot {}
+
 struct HookState {
     machine: Machine,
-    cfg: CapsLockRemap,
     tap_timeout_ms: u64,
     timer: Option<TimerHandle>,
 }
 
-struct HookThread {
-    thread_id: u32,
-    join: Option<JoinHandle<()>>,
-}
-
 static STATE: OnceLock<Mutex<HookState>> = OnceLock::new();
-static HOOK_THREAD: OnceLock<Mutex<Option<HookThread>>> = OnceLock::new();
+static CFG: OnceLock<ArcSwap<CapsLockRemap>> = OnceLock::new();
+static HOOK_HANDLE: OnceLock<Mutex<Option<HookSlot>>> = OnceLock::new();
 
-fn ensure_state(cfg: CapsLockRemap, tap_timeout_ms: u64) -> &'static Mutex<HookState> {
+static CALLBACK_FIRES: AtomicU64 = AtomicU64::new(0);
+static CAPS_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+fn ensure_state(cfg: CapsLockRemap, tap_timeout_ms: u64) {
     STATE.get_or_init(|| {
         Mutex::new(HookState {
             machine: Machine::new(),
-            cfg,
             tap_timeout_ms,
             timer: None,
         })
-    })
+    });
+    CFG.get_or_init(|| ArcSwap::new(Arc::new(cfg.clone())));
 }
 
-/// Install (idempotent) the WH_KEYBOARD_LL hook on a dedicated thread.
-/// Subsequent calls update the active CapsLockRemap / tap_timeout via the
-/// shared STATE without re-spawning the thread.
+/// Install (idempotent) the WH_KEYBOARD_LL hook on the *calling thread*.
+/// The caller must be the thread running the application's message pump
+/// (eframe's main thread).
 pub fn install(cfg: CapsLockRemap, tap_timeout_ms: u64) -> Result<()> {
     ensure_state(cfg.clone(), tap_timeout_ms);
     reconfigure(cfg, tap_timeout_ms);
 
-    let slot = HOOK_THREAD.get_or_init(|| Mutex::new(None));
+    let slot = HOOK_HANDLE.get_or_init(|| Mutex::new(None));
     let mut slot = slot.lock().unwrap();
     if slot.is_some() {
         return Ok(());
     }
 
-    let (tid_tx, tid_rx) = std::sync::mpsc::channel::<Result<u32>>();
-    let join = thread::Builder::new()
-        .name("wconfig-keyboard-hook".into())
-        .spawn(move || hook_thread_main(tid_tx))
-        .context("spawn hook thread")?;
-
-    let tid = tid_rx
-        .recv()
-        .context("hook thread failed to report its id")?
-        .context("hook thread init")?;
-    *slot = Some(HookThread {
-        thread_id: tid,
-        join: Some(join),
-    });
-    tracing::info!("keyboard hook installed on dedicated thread tid={tid}");
+    let hmod = unsafe {
+        GetModuleHandleW(PCWSTR::null()).context("GetModuleHandleW(NULL)")?
+    };
+    let hh = unsafe {
+        SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(low_level_proc),
+            Some(HINSTANCE(hmod.0)),
+            0,
+        )
+        .context("SetWindowsHookExW(WH_KEYBOARD_LL)")?
+    };
+    *slot = Some(HookSlot(hh));
+    tracing::info!("keyboard hook installed on calling thread");
     Ok(())
 }
 
-/// Signal the hook thread to exit. Safe to call when no hook is active.
+/// Uninstall the OS hook if installed. Safe to call when no hook is active.
 pub fn uninstall() -> Result<()> {
-    let Some(slot) = HOOK_THREAD.get() else {
+    let Some(slot) = HOOK_HANDLE.get() else {
         return Ok(());
     };
     let mut slot = slot.lock().unwrap();
-    let Some(mut thread) = slot.take() else {
-        return Ok(());
-    };
-
-    unsafe {
-        PostThreadMessageW(thread.thread_id, WM_QUIT, WPARAM(0), LPARAM(0))
-            .context("PostThreadMessageW WM_QUIT")?;
+    if let Some(HookSlot(hh)) = slot.take() {
+        unsafe {
+            UnhookWindowsHookEx(hh).context("UnhookWindowsHookEx")?;
+        }
+        tracing::info!("keyboard hook uninstalled");
     }
-    if let Some(join) = thread.join.take() {
-        // The pump exits on WM_QUIT and the unhook+drop happens inside the
-        // thread, so join is fast.
-        let _ = join.join();
-    }
-    tracing::info!("keyboard hook uninstalled");
     Ok(())
 }
 
 /// Hot-update the active remap config without disturbing the hook.
 pub fn reconfigure(new_cfg: CapsLockRemap, tap_timeout_ms: u64) {
+    if let Some(cfg) = CFG.get() {
+        cfg.store(Arc::new(new_cfg));
+    }
     if let Some(state) = STATE.get() {
-        let mut s = state.lock().unwrap();
-        s.cfg = new_cfg;
-        s.tap_timeout_ms = tap_timeout_ms;
+        state.lock().unwrap().tap_timeout_ms = tap_timeout_ms;
     }
 }
 
 /// Re-enter the FSM with a Timeout event. Called by the timer thread.
 pub(super) fn fire_timeout(timestamp_ms: u64) {
-    let Some(state) = STATE.get() else {
+    let (Some(state), Some(cfg)) = (STATE.get(), CFG.get()) else {
         return;
     };
+    let cfg = cfg.load_full();
+    if cfg.mode != RemapMode::Dual {
+        return;
+    }
     let mut s = state.lock().unwrap();
-    let cfg = s.cfg.clone();
     let effects = s.machine.handle(HookEvent::Timeout { timestamp_ms }, &cfg);
+    refresh_state_tag(&s.machine);
     drop(s);
     apply_effects(&effects);
 }
 
-fn hook_thread_main(tid_tx: std::sync::mpsc::Sender<Result<u32>>) {
-    let tid = unsafe { GetCurrentThreadId() };
-    tracing::info!("hook thread starting (tid={tid})");
-
-    // Use GetModuleHandleW(NULL) for hMod. While the docs say a null HINSTANCE
-    // is acceptable for WH_KEYBOARD_LL with the hook proc in the calling EXE,
-    // in practice some Windows configurations only honour the hook when hMod
-    // is the EXE's module handle (mirrors PowerToys / kanata's approach).
-    let hmod = match unsafe { GetModuleHandleW(PCWSTR::null()) } {
-        Ok(h) => HINSTANCE(h.0),
-        Err(e) => {
-            let _ = tid_tx.send(Err(anyhow::anyhow!("GetModuleHandleW(NULL): {e}")));
-            return;
-        }
+fn refresh_state_tag(machine: &Machine) {
+    let tag = match machine.state_kind() {
+        StateKind::Idle => STATE_IDLE,
+        StateKind::Pending => STATE_PENDING,
+        StateKind::HoldActive => STATE_HOLD,
     };
-    tracing::info!("hook thread got hmod={:?}", hmod.0);
-
-    let hh = match unsafe {
-        SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_proc), Some(hmod), 0)
-    } {
-        Ok(h) => {
-            tracing::info!("SetWindowsHookExW succeeded, hhook={:?}", h.0);
-            h
-        }
-        Err(e) => {
-            tracing::error!("SetWindowsHookExW failed: {e:#}");
-            let _ = tid_tx.send(Err(anyhow::anyhow!("SetWindowsHookExW: {e}")));
-            return;
-        }
-    };
-
-    if tid_tx.send(Ok(tid)).is_err() {
-        unsafe {
-            let _ = UnhookWindowsHookEx(hh);
-        }
-        return;
-    }
-
-    tracing::info!("hook thread entering message pump (tid={tid})");
-
-    // Tight Win32 message pump. GetMessageW blocks until a message arrives.
-    // WH_KEYBOARD_LL callbacks are dispatched into this thread by the OS;
-    // the pump just needs to be alive to receive them. PostThreadMessage
-    // (WM_QUIT) from uninstall() returns 0 and the loop exits.
-    let mut msg = MSG::default();
-    loop {
-        let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-        if !r.as_bool() {
-            break;
-        }
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-
-    tracing::info!("hook thread exiting (tid={tid})");
-    unsafe {
-        let _ = UnhookWindowsHookEx(hh);
-    }
+    STATE_TAG.store(tag, Ordering::Release);
 }
 
-static CALLBACK_FIRES: AtomicU64 = AtomicU64::new(0);
-static CAPS_EVENTS: AtomicU64 = AtomicU64::new(0);
-
 unsafe extern "system" fn low_level_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // catch_unwind guards the extern "system" boundary: panicking across an
-    // FFI callback is UB and would also kill the hook thread, which then
-    // silently breaks all subsequent keyboard events.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
         low_level_proc_inner(code, wparam, lparam)
     }));
@@ -224,20 +174,20 @@ unsafe fn low_level_proc_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     }
     let info: &KBDLLHOOKSTRUCT = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
 
-    let injected = info.dwExtraInfo == WCONFIG_MARKER || (info.flags.0 & LLKHF_INJECTED.0) != 0;
-
-    // Log the first few callback fires (any event) so we can confirm the hook
-    // is actually receiving events from the OS.
+    // Diagnostic: log the very first few callback fires so the log makes it
+    // clear that the OS is actually dispatching to us.
     let n = CALLBACK_FIRES.fetch_add(1, Ordering::Relaxed);
-    if n < 3 {
+    if n < 5 {
         tracing::info!(
-            "hook fire #{n}: code={code}, wparam={:#x}, vk={:#x}, flags={:#x}, injected={injected}",
+            "hook fire #{n}: wparam={:#x}, vk={:#x}, flags={:#x}",
             wparam.0,
             info.vkCode,
             info.flags.0
         );
     }
 
+    // Skip our own injected events and other injected events.
+    let injected = info.dwExtraInfo == WCONFIG_MARKER || (info.flags.0 & LLKHF_INJECTED.0) != 0;
     if injected {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
@@ -250,32 +200,28 @@ unsafe fn low_level_proc_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     }
 
     let vk = info.vkCode;
-    let now = info.time as u64;
     let is_caps = vk == VK_CAPITAL.0 as u32;
 
-    if is_caps {
-        let n = CAPS_EVENTS.fetch_add(1, Ordering::Relaxed);
-        let kind = STATE
-            .get()
-            .and_then(|s| s.try_lock().ok())
-            .map(|s| s.machine.state_kind());
-        tracing::info!("caps {} #{n}, state={:?}", if is_down { "down" } else { "up" }, kind);
+    // Ultra-fast path. Reading both atomics is a few nanoseconds. For the
+    // overwhelming majority of keystrokes (non-caps, FSM idle, mode != Dual),
+    // we fall through to CallNextHookEx without touching the mutex at all.
+    let state_tag = STATE_TAG.load(Ordering::Acquire);
+    if !is_caps && state_tag == STATE_IDLE {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
-    // Fast-path: when not Caps and the FSM is Idle, almost every event is a
-    // pure passthrough. Skip the mutex + clone + Vec allocation on the hot
-    // path so we stay well under the 300ms timeout even under load.
-    if !is_caps {
-        if let Some(state) = STATE.get() {
-            if let Ok(s) = state.try_lock() {
-                if matches!(s.machine.state_kind(), super::state::StateKind::Idle) {
-                    drop(s);
-                    return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-                }
-            }
-        }
+    // Mode check via lock-free ArcSwap.
+    let Some(cfg) = CFG.get() else {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    };
+    let cfg = cfg.load_full();
+
+    // Off mode: pure passthrough.
+    if cfg.mode == RemapMode::Off {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
+    let now = info.time as u64;
     let event = match (is_caps, is_down) {
         (true, true) => HookEvent::CapsDown { timestamp_ms: now },
         (true, false) => HookEvent::CapsUp { timestamp_ms: now },
@@ -294,12 +240,17 @@ unsafe fn low_level_proc_inner(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
     };
 
     let mut s = state.lock().unwrap();
-    let cfg = s.cfg.clone();
     let effects = s.machine.handle(event, &cfg);
+    refresh_state_tag(&s.machine);
     drop(s);
 
     if is_caps {
-        tracing::info!("caps effects: {:?}", effects);
+        let n = CAPS_EVENTS.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            "caps {} #{n}, effects={:?}",
+            if is_down { "down" } else { "up" },
+            effects
+        );
     }
 
     let mut suppress = false;
@@ -331,7 +282,6 @@ fn apply_effects(effects: &[Effect]) {
                 schedule_timeout(now_ms());
             }
             Effect::CancelTimeout => cancel_timeout(),
-            // Suppress/PassThrough are meaningless outside the hook callback.
             _ => {}
         }
     }
@@ -395,4 +345,3 @@ fn send_key(vk: u32, down: bool) {
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
 }
-
