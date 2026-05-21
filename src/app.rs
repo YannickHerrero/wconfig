@@ -42,6 +42,7 @@ pub struct App {
     theme_applied: bool,
     dirty: bool,
     last_status: Option<String>,
+    quitting: bool,
 }
 
 impl App {
@@ -89,6 +90,7 @@ impl App {
             theme_applied: false,
             dirty: false,
             last_status: None,
+            quitting: false,
         }
     }
 
@@ -148,6 +150,8 @@ impl App {
                     }
                 }
             } else if ev.id == self.tray.quit_id {
+                tracing::info!("quit requested from tray");
+                self.quitting = true;
                 let _ = remap::uninstall();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -209,8 +213,13 @@ impl eframe::App for App {
         self.poll_cfg(&ctx);
         self.poll_show(&ctx);
 
-        // Intercept close: hide to tray instead of exiting.
+        // Intercept close: hide to tray instead of exiting — unless the user
+        // explicitly chose Quit from the tray menu.
         if ctx.input(|i| i.viewport().close_requested()) {
+            if self.quitting {
+                tracing::info!("close honoured: quitting");
+                return;
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.hide_window(&ctx);
             return;
