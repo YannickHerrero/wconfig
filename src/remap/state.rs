@@ -49,6 +49,16 @@ enum State {
     HoldActive,
 }
 
+/// Coarse-grained variant of [`State`] without the inner data, exposed so the
+/// hook callback can fast-path the common Idle case without taking the lock
+/// long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateKind {
+    Idle,
+    Pending,
+    HoldActive,
+}
+
 #[derive(Debug, Default)]
 pub struct Machine {
     state: State,
@@ -57,6 +67,14 @@ pub struct Machine {
 impl Machine {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn state_kind(&self) -> StateKind {
+        match self.state {
+            State::Idle => StateKind::Idle,
+            State::Pending { .. } => StateKind::Pending,
+            State::HoldActive => StateKind::HoldActive,
+        }
     }
 
     /// Returns the list of effects produced by an event under the given config.
