@@ -7,7 +7,7 @@ use tray_icon::menu::MenuEvent;
 
 use crate::action;
 use crate::autostart;
-use crate::config::{Config, watcher as config_watcher};
+use crate::config::{Config, RemapMode, watcher as config_watcher};
 use crate::hotkey::{BindingError, Manager as HotkeyMgr};
 use crate::ipc::ShowGui;
 use crate::remap;
@@ -128,7 +128,19 @@ impl App {
     fn apply_runtime(&mut self, ctx: &egui::Context) {
         theme::apply(ctx, self.cfg.theme);
         self.binding_errors = self.hotkey.set_bindings(&self.cfg.bindings);
-        remap::reconfigure(self.cfg.remap.caps_lock.clone(), self.cfg.daemon.tap_timeout_ms);
+        // The OS hook is only installed when there's a real remap to apply.
+        // This avoids interfering with other apps' global hotkeys (e.g. window
+        // managers) via the WH_KEYBOARD_LL chain when wconfig has nothing to do.
+        if self.cfg.remap.caps_lock.mode == RemapMode::Off {
+            if let Err(e) = remap::uninstall() {
+                tracing::warn!("uninstall keyboard hook: {e:#}");
+            }
+        } else if let Err(e) = remap::install(
+            self.cfg.remap.caps_lock.clone(),
+            self.cfg.daemon.tap_timeout_ms,
+        ) {
+            tracing::warn!("install keyboard hook: {e:#}");
+        }
         if let Err(e) = autostart::sync(self.cfg.daemon.autostart) {
             tracing::warn!("sync autostart: {e}");
         }

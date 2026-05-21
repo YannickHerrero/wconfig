@@ -54,10 +54,12 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    if let Err(e) = remap::install(cfg.remap.caps_lock.clone(), cfg.daemon.tap_timeout_ms) {
-        tracing::warn!("install keyboard hook: {e:#}");
+    if cfg.remap.caps_lock.mode != config::RemapMode::Off {
+        if let Err(e) = remap::install(cfg.remap.caps_lock.clone(), cfg.daemon.tap_timeout_ms) {
+            tracing::warn!("install keyboard hook: {e:#}");
+        }
     } else {
-        tracing::info!("keyboard hook installed");
+        tracing::info!("remap mode = off: keyboard hook not installed");
     }
 
     let hotkey = match hotkey::Manager::new() {
