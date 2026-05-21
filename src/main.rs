@@ -2,6 +2,7 @@
 
 mod action;
 mod app;
+mod autostart;
 mod config;
 mod hotkey;
 mod remap;
