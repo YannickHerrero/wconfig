@@ -1,3 +1,4 @@
+pub mod focus_or_launch;
 pub mod launch;
 pub mod script;
 pub mod url;
@@ -11,6 +12,10 @@ pub fn run(action: &Action) -> Result<()> {
         Action::Launch { command } => launch::run(command),
         Action::Url { url } => url::open(url),
         Action::Script { shell, script } => script::run(*shell, script),
-        Action::FocusOrLaunch { .. } => anyhow::bail!("focus_or_launch not yet implemented"),
+        Action::FocusOrLaunch {
+            exe_path,
+            match_basename,
+            launch_args,
+        } => focus_or_launch::run(exe_path, *match_basename, launch_args),
     }
 }
