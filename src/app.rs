@@ -1,5 +1,4 @@
 use std::sync::mpsc::{Receiver, channel};
-use std::time::{Duration, Instant};
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
@@ -8,10 +7,9 @@ use tray_icon::menu::MenuEvent;
 
 use crate::action;
 use crate::autostart;
-use crate::config::{Config, RemapMode, watcher as config_watcher};
+use crate::config::{Config, watcher as config_watcher};
 use crate::hotkey::{BindingError, Manager as HotkeyMgr};
 use crate::ipc::ShowGui;
-use crate::remap;
 use crate::tray::Tray;
 use crate::ui::{bindings, general, theme};
 
@@ -43,7 +41,6 @@ pub struct App {
     dirty: bool,
     last_status: Option<String>,
     quitting: bool,
-    last_heartbeat: Instant,
 }
 
 impl App {
@@ -92,24 +89,6 @@ impl App {
             dirty: false,
             last_status: None,
             quitting: false,
-            last_heartbeat: Instant::now(),
-        }
-    }
-
-    fn maybe_heartbeat(&mut self, ctx: &egui::Context) {
-        if self.last_heartbeat.elapsed() < Duration::from_secs(5) {
-            return;
-        }
-        self.last_heartbeat = Instant::now();
-        ctx.request_repaint_after(Duration::from_secs(5));
-
-        let (fires, caps) = remap::counters();
-        let mode = self.cfg.remap.caps_lock.mode;
-        if mode != RemapMode::Off {
-            tracing::info!(
-                "heartbeat: remap mode={:?}, hook fires={fires}, caps events={caps}",
-                mode
-            );
         }
     }
 
@@ -147,19 +126,6 @@ impl App {
     fn apply_runtime(&mut self, ctx: &egui::Context) {
         theme::apply(ctx, self.cfg.theme);
         self.binding_errors = self.hotkey.set_bindings(&self.cfg.bindings);
-        // The OS hook is only installed when there's a real remap to apply.
-        // This avoids interfering with other apps' global hotkeys (e.g. window
-        // managers) via the WH_KEYBOARD_LL chain when wconfig has nothing to do.
-        if self.cfg.remap.caps_lock.mode == RemapMode::Off {
-            if let Err(e) = remap::uninstall() {
-                tracing::warn!("uninstall keyboard hook: {e:#}");
-            }
-        } else if let Err(e) = remap::install(
-            self.cfg.remap.caps_lock.clone(),
-            self.cfg.daemon.tap_timeout_ms,
-        ) {
-            tracing::warn!("install keyboard hook: {e:#}");
-        }
         if let Err(e) = autostart::sync(self.cfg.daemon.autostart) {
             tracing::warn!("sync autostart: {e}");
         }
@@ -183,7 +149,6 @@ impl App {
             } else if ev.id == self.tray.quit_id {
                 tracing::info!("quit requested from tray");
                 self.quitting = true;
-                let _ = remap::uninstall();
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -243,7 +208,6 @@ impl eframe::App for App {
         self.poll_hotkey();
         self.poll_cfg(&ctx);
         self.poll_show(&ctx);
-        self.maybe_heartbeat(&ctx);
 
         // Intercept close: hide to tray instead of exiting — unless the user
         // explicitly chose Quit from the tray menu.

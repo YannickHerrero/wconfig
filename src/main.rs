@@ -45,7 +45,7 @@ fn main() -> eframe::Result<()> {
 
     let cfg = match config::Config::load() {
         Ok(c) => {
-            tracing::info!("config loaded ({} bindings, remap mode {:?})", c.bindings.len(), c.remap.caps_lock.mode);
+            tracing::info!("config loaded ({} bindings)", c.bindings.len());
             c
         }
         Err(e) => {
@@ -53,14 +53,6 @@ fn main() -> eframe::Result<()> {
             config::Config::default()
         }
     };
-
-    if cfg.remap.caps_lock.mode != config::RemapMode::Off {
-        if let Err(e) = remap::install(cfg.remap.caps_lock.clone(), cfg.daemon.tap_timeout_ms) {
-            tracing::warn!("install keyboard hook: {e:#}");
-        }
-    } else {
-        tracing::info!("remap mode = off: keyboard hook not installed");
-    }
 
     let hotkey = match hotkey::Manager::new() {
         Ok(m) => {
