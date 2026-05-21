@@ -17,6 +17,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     let mut remove: Option<usize> = None;
 
+    let errors = app.binding_errors.clone();
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (idx, binding) in app.cfg.bindings.iter_mut().enumerate() {
             ui.push_id(idx, |ui| {
@@ -32,6 +33,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     });
                     ui.add_space(4.0);
                     action_editor(ui, &mut binding.action);
+                    for err in errors.iter().filter(|e| e.index == idx) {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("⚠ {}", err.message))
+                                .small()
+                                .color(egui::Color32::from_rgb(0xC0, 0x39, 0x2B)),
+                        );
+                    }
                 });
             });
             ui.add_space(6.0);
