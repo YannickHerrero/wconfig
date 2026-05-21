@@ -64,6 +64,15 @@ static HOOK_HANDLE: OnceLock<Mutex<Option<HookSlot>>> = OnceLock::new();
 static CALLBACK_FIRES: AtomicU64 = AtomicU64::new(0);
 static CAPS_EVENTS: AtomicU64 = AtomicU64::new(0);
 
+/// Read the running totals so callers (e.g. the app's periodic heartbeat
+/// logger) can confirm whether the OS is actually dispatching events.
+pub fn counters() -> (u64, u64) {
+    (
+        CALLBACK_FIRES.load(Ordering::Relaxed),
+        CAPS_EVENTS.load(Ordering::Relaxed),
+    )
+}
+
 fn ensure_state(cfg: CapsLockRemap, tap_timeout_ms: u64) {
     STATE.get_or_init(|| {
         Mutex::new(HookState {

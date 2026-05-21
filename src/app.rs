@@ -1,4 +1,5 @@
 use std::sync::mpsc::{Receiver, channel};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
@@ -43,6 +44,7 @@ pub struct App {
     dirty: bool,
     last_status: Option<String>,
     quitting: bool,
+    last_heartbeat: Instant,
 }
 
 impl App {
@@ -91,6 +93,24 @@ impl App {
             dirty: false,
             last_status: None,
             quitting: false,
+            last_heartbeat: Instant::now(),
+        }
+    }
+
+    fn maybe_heartbeat(&mut self, ctx: &egui::Context) {
+        if self.last_heartbeat.elapsed() < Duration::from_secs(5) {
+            return;
+        }
+        self.last_heartbeat = Instant::now();
+        ctx.request_repaint_after(Duration::from_secs(5));
+
+        let (fires, caps) = remap::counters();
+        let mode = self.cfg.remap.caps_lock.mode;
+        if mode != RemapMode::Off {
+            tracing::info!(
+                "heartbeat: remap mode={:?}, hook fires={fires}, caps events={caps}",
+                mode
+            );
         }
     }
 
@@ -224,6 +244,7 @@ impl eframe::App for App {
         self.poll_hotkey();
         self.poll_cfg(&ctx);
         self.poll_show(&ctx);
+        self.maybe_heartbeat(&ctx);
 
         // Intercept close: hide to tray instead of exiting — unless the user
         // explicitly chose Quit from the tray menu.

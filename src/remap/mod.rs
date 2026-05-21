@@ -3,4 +3,4 @@ pub mod state;
 pub mod timer;
 pub mod vk;
 
-pub use hook::{install, uninstall};
+pub use hook::{counters, install, uninstall};
